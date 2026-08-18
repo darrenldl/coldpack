@@ -34,6 +34,21 @@ class FileRecord:
             separators=(",", ":"),
         )
 
+    @classmethod
+    def from_dict(cls, value: dict) -> "FileRecord":
+        try:
+            hash_algo, hash_value = value["hash"].split(":", 1)
+            return cls(
+                path=value["path"],
+                hash_algo=hash_algo,
+                hash=hash_value,
+                size=value["size"],
+                mtime_ns=value["mtime_ns"],
+                pack=value["pack"],
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("invalid file record in manifest") from error
+
 
 def require_tools(*tools: str) -> None:
     if not tools:
@@ -307,16 +322,16 @@ def atomic_replace(temp: Path, final: Path) -> None:
     os.replace(temp, final)
 
 
-def next_pack_id(destination: Path, pack_prefix: str) -> str:
-    """Return PREFIX-NNN using the next version present in destination."""
-    if not pack_prefix or pack_prefix in (".", ".."):
-        raise RuntimeError("pack prefix must not be empty, '.' or '..'")
+def next_pack_version(destination: Path, pack_id: str) -> int:
+    """Return the next numeric version for a pack ID."""
+    if not pack_id or pack_id in (".", ".."):
+        raise RuntimeError("pack ID must not be empty, '.' or '..'")
 
-    if "/" in pack_prefix or "\\" in pack_prefix:
-        raise RuntimeError("pack prefix must not contain path separators")
+    if "/" in pack_id or "\\" in pack_id:
+        raise RuntimeError("pack ID must not contain path separators")
 
     pattern = re.compile(
-        rf"coldpack-{re.escape(pack_prefix)}-(\d+)"
+        rf"coldpack-{re.escape(pack_id)}-(\d+)"
         rf"(?:\.tar\.zst|\.jsonl)\.age"
     )
     versions = []
@@ -327,44 +342,126 @@ def next_pack_id(destination: Path, pack_prefix: str) -> str:
         if match is not None:
             versions.append(int(match.group(1)))
 
-    version = max(versions, default=-1) + 1
-    return f"{pack_prefix}-{version:03d}"
+    return max(versions, default=-1) + 1
+
+
+def latest_manifest(destination: Path, pack_id: str) -> tuple[Path, str] | None:
+    """Return the latest manifest path and full pack ID for a series."""
+    pattern = re.compile(
+        rf"coldpack-({re.escape(pack_id)}-(\d+))\.jsonl\.age"
+    )
+    matches = []
+
+    for path in destination.iterdir():
+        match = pattern.fullmatch(path.name)
+
+        if match is not None:
+            matches.append((int(match.group(2)), path.name, path, match.group(1)))
+
+    if not matches:
+        return None
+
+    _, _, path, pack_id = max(matches)
+    return path, pack_id
+
+
+def read_manifest(
+    path: Path,
+    expected_pack_id: str,
+    passphrase: str,
+) -> list[FileRecord]:
+    """Decrypt and parse a cumulative pack manifest."""
+    with path.open("rb") as infile:
+        age = age_decrypt_process(
+            stdin=infile,
+            stdout=subprocess.PIPE,
+            passphrase=passphrase,
+        )
+        plaintext, _ = age.communicate()
+
+    if age.returncode != 0:
+        raise RuntimeError(f"age failed with exit status {age.returncode}")
+
+    try:
+        lines = plaintext.decode("utf-8").splitlines()
+        header = json.loads(lines[0])
+    except (IndexError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid manifest: {path}") from error
+
+    if header != {"type": "pack", "version": 1, "pack": expected_pack_id}:
+        raise RuntimeError(f"invalid manifest header: {path}")
+
+    records = []
+
+    for line_number, line in enumerate(lines[1:], start=2):
+        try:
+            value = json.loads(line)
+            records.append(FileRecord.from_dict(value))
+        except (json.JSONDecodeError, RuntimeError) as error:
+            raise RuntimeError(
+                f"invalid manifest record at {path}:{line_number}"
+            ) from error
+
+    return records
 
 
 def create_pack(
     root: Path,
     destination: Path,
-    pack_prefix: str,
+    pack_id: str,
     passphrase: str,
 ) -> str:
     root = root.resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    pack_id = next_pack_id(destination, pack_prefix)
+    pack_version = next_pack_version(destination, pack_id)
+    full_pack_id = f"{pack_id}-{pack_version:03d}"
 
-    records = scan(root, pack_id)
+    previous_manifest = latest_manifest(destination, pack_id)
 
-    archive_final = destination / f"coldpack-{pack_id}.tar.zst.age"
-    manifest_final = destination / f"coldpack-{pack_id}.jsonl.age"
+    if previous_manifest is None:
+        previous_records = []
+    else:
+        manifest_path, manifest_pack_id = previous_manifest
+        previous_records = read_manifest(
+            manifest_path,
+            manifest_pack_id,
+            passphrase,
+        )
 
-    archive_tmp = destination / f".coldpack-{pack_id}.tar.zst.age.tmp"
-    manifest_plain_tmp = destination / f".coldpack-{pack_id}.jsonl.tmp"
-    manifest_encrypted_tmp = destination / f".coldpack-{pack_id}.jsonl.age.tmp"
+    observed_records = scan(root, full_pack_id)
+    witnessed = {
+        (record.path, record.hash_algo, record.hash)
+        for record in previous_records
+    }
+    new_records = [
+        record
+        for record in observed_records
+        if (record.path, record.hash_algo, record.hash) not in witnessed
+    ]
+    cumulative_records = previous_records + new_records
+
+    archive_final = destination / f"coldpack-{full_pack_id}.tar.zst.age"
+    manifest_final = destination / f"coldpack-{full_pack_id}.jsonl.age"
+
+    archive_tmp = destination / f".coldpack-{full_pack_id}.tar.zst.age.tmp"
+    manifest_plain_tmp = destination / f".coldpack-{full_pack_id}.jsonl.tmp"
+    manifest_encrypted_tmp = destination / f".coldpack-{full_pack_id}.jsonl.age.tmp"
 
     if archive_final.exists() or manifest_final.exists():
-        raise RuntimeError(f"pack already exists: {pack_id}")
+        raise RuntimeError(f"pack already exists: {full_pack_id}")
 
     try:
         create_archive(
             root,
-            records,
+            new_records,
             archive_tmp,
             passphrase,
         )
 
         write_manifest(
             manifest_plain_tmp,
-            pack_id,
-            records,
+            full_pack_id,
+            cumulative_records,
         )
 
         encrypt_file(
@@ -382,7 +479,7 @@ def create_pack(
         manifest_plain_tmp.unlink(missing_ok=True)
         manifest_encrypted_tmp.unlink(missing_ok=True)
 
-    return pack_id
+    return full_pack_id
 
 
 def extract_pack(
@@ -504,8 +601,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pack.add_argument("root", type=Path, help="directory to archive")
     pack.add_argument("destination", type=Path, help="directory for pack files")
     pack.add_argument(
-        "pack_prefix",
-        help="ID prefix; the next numeric version is selected automatically",
+        "pack_id",
+        help="series ID; the next numeric pack version is selected automatically",
     )
 
     extract = commands.add_parser("extract", help="extract an encrypted archive")
@@ -529,7 +626,7 @@ def main(argv: list[str] | None = None) -> None:
         pack_id = create_pack(
             args.root,
             args.destination,
-            args.pack_prefix,
+            args.pack_id,
             prompt_passphrase(confirm=True),
         )
         print(f"created pack {pack_id}", file=sys.stderr)

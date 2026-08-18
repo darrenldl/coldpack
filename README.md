@@ -7,14 +7,18 @@ Simple encrypted archives for cold files
 Create a pack (the passphrase is requested twice):
 
 ```console
-python3 coldpack.py pack ROOT DEST PACK_PREFIX
+python3 coldpack.py pack ROOT DEST PACK_ID
 ```
 
-Coldpack automatically adds the next three-digit numeric version to the prefix.
-For example, the first pack using prefix `2026-aug` creates
+Coldpack automatically adds the next three-digit pack version to the pack ID.
+For example, the first pack using ID `2026-aug` creates
 `coldpack-2026-aug-000.tar.zst.age` and
-`coldpack-2026-aug-000.jsonl.age`. The next invocation with the same prefix
+`coldpack-2026-aug-000.jsonl.age`. The next invocation with the same pack ID
 uses version `001`.
+
+Each version archives only `(path, hash)` pairs not already witnessed by the
+series. Its manifest remains cumulative: it contains every file version seen in
+the series and records the pack version where that content was first stored.
 
 Extract a pack (the passphrase is requested once):
 
