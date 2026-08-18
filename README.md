@@ -14,8 +14,8 @@ Coldpack adds the current UTC date and time to the supplied pack ID. For example
 a pack using ID `2026-aug` might create:
 
 ```text
-coldpack-2026-aug-20260818T143052Z.tar.gz.age
-coldpack-2026-aug-20260818T143052Z.manifest.jsonl.age
+coldpack-2026-aug-2026-08-18T143052Z.tar.gz.age
+coldpack-2026-aug-2026-08-18T143052Z.manifest.jsonl.age
 ```
 
 Every pack is a complete, independent archive. The encrypted sidecar manifest

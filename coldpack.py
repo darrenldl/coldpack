@@ -314,7 +314,7 @@ def validate_pack_id(pack_id: str) -> None:
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
 
 
 def create_pack(
