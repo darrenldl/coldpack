@@ -3,19 +3,15 @@ import getpass
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 CHUNK_SIZE = 1024 * 1024
-
-
-class ManifestDecryptionError(RuntimeError):
-    pass
 
 
 @dataclass
@@ -39,32 +35,16 @@ class FileRecord:
             separators=(",", ":"),
         )
 
-    @classmethod
-    def from_dict(cls, value: dict) -> "FileRecord":
-        try:
-            hash_algo, hash_value = value["hash"].split(":", 1)
-            return cls(
-                path=value["path"],
-                hash_algo=hash_algo,
-                hash=hash_value,
-                size=value["size"],
-                mtime_ns=value["mtime_ns"],
-                pack=value["pack"],
-            )
-        except (AttributeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError("invalid file record in manifest") from error
-
-
 def require_tools(*tools: str) -> None:
     if not tools:
-        tools = ("tar", "zstd", "age", "age-plugin-batchpass")
+        tools = ("tar", "gzip", "age", "age-plugin-batchpass")
 
     for tool in tools:
         if shutil.which(tool) is None:
             raise SystemExit(f"required tool not found: {tool}")
 
 
-def hash_file(path: Path) -> tuple[str,str]:
+def hash_file(path: Path) -> tuple[str, str]:
     h = hashlib.blake2b()
 
     with path.open("rb") as f:
@@ -241,7 +221,7 @@ def create_archive(
     passphrase: str,
 ) -> None:
     """
-    Pipe: path list -> tar -> zstd -> age -> destination
+    Pipe: path list -> tar -> gzip -> age -> destination
     """
 
     with destination.open("wb") as outfile:
@@ -263,12 +243,11 @@ def create_archive(
         assert tar.stdin is not None
         assert tar.stdout is not None
 
-        # zstd
+        # gzip
 
-        zstd = subprocess.Popen(
+        gzip = subprocess.Popen(
             [
-                "zstd",
-                "-q",
+                "gzip",
                 "-c",
             ],
             stdin=tar.stdout,
@@ -277,17 +256,17 @@ def create_archive(
 
         tar.stdout.close()
 
-        assert zstd.stdout is not None
+        assert gzip.stdout is not None
 
         # age
 
         age = age_encrypt_process(
-            stdin=zstd.stdout,
+            stdin=gzip.stdout,
             stdout=outfile,
             passphrase=passphrase,
         )
 
-        zstd.stdout.close()
+        gzip.stdout.close()
 
         try:
             for record in records:
@@ -297,11 +276,11 @@ def create_archive(
             tar.stdin.close()
 
             tar_rc = tar.wait()
-            zstd_rc = zstd.wait()
+            gzip_rc = gzip.wait()
             age_rc = age.wait()
 
         except BaseException:
-            for proc in (tar, zstd, age):
+            for proc in (tar, gzip, age):
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -314,9 +293,9 @@ def create_archive(
         destination.unlink(missing_ok=True)
         raise RuntimeError(f"tar failed with exit status {tar_rc}")
 
-    if zstd_rc != 0:
+    if gzip_rc != 0:
         destination.unlink(missing_ok=True)
-        raise RuntimeError(f"zstd failed with exit status {zstd_rc}")
+        raise RuntimeError(f"gzip failed with exit status {gzip_rc}")
 
     if age_rc != 0:
         destination.unlink(missing_ok=True)
@@ -327,89 +306,16 @@ def atomic_replace(temp: Path, final: Path) -> None:
     os.replace(temp, final)
 
 
-def next_pack_version(destination: Path, pack_id: str) -> int:
-    """Return the next numeric version for a pack ID."""
+def validate_pack_id(pack_id: str) -> None:
     if not pack_id or pack_id in (".", ".."):
         raise RuntimeError("pack ID must not be empty, '.' or '..'")
 
     if "/" in pack_id or "\\" in pack_id:
         raise RuntimeError("pack ID must not contain path separators")
 
-    pattern = re.compile(
-        rf"coldpack-{re.escape(pack_id)}-(\d+)"
-        rf"(?:\.tar\.zst|\.jsonl)\.age"
-    )
-    versions = []
 
-    for path in destination.iterdir():
-        match = pattern.fullmatch(path.name)
-
-        if match is not None:
-            versions.append(int(match.group(1)))
-
-    return max(versions, default=-1) + 1
-
-
-def latest_manifest(destination: Path, pack_id: str) -> tuple[Path, str] | None:
-    """Return the latest manifest path and full pack ID for a series."""
-    pattern = re.compile(
-        rf"coldpack-({re.escape(pack_id)}-(\d+))\.jsonl\.age"
-    )
-    matches = []
-
-    for path in destination.iterdir():
-        match = pattern.fullmatch(path.name)
-
-        if match is not None:
-            matches.append((int(match.group(2)), path.name, path, match.group(1)))
-
-    if not matches:
-        return None
-
-    _, _, path, pack_id = max(matches)
-    return path, pack_id
-
-
-def read_manifest(
-    path: Path,
-    expected_pack_id: str,
-    passphrase: str,
-) -> list[FileRecord]:
-    """Decrypt and parse a cumulative pack manifest."""
-    with path.open("rb") as infile:
-        age = age_decrypt_process(
-            stdin=infile,
-            stdout=subprocess.PIPE,
-            passphrase=passphrase,
-        )
-        plaintext, _ = age.communicate()
-
-    if age.returncode != 0:
-        raise ManifestDecryptionError(
-            f"age failed with exit status {age.returncode}"
-        )
-
-    try:
-        lines = plaintext.decode("utf-8").splitlines()
-        header = json.loads(lines[0])
-    except (IndexError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"invalid manifest: {path}") from error
-
-    if header != {"type": "pack", "version": 1, "pack": expected_pack_id}:
-        raise RuntimeError(f"invalid manifest header: {path}")
-
-    records = []
-
-    for line_number, line in enumerate(lines[1:], start=2):
-        try:
-            value = json.loads(line)
-            records.append(FileRecord.from_dict(value))
-        except (json.JSONDecodeError, RuntimeError) as error:
-            raise RuntimeError(
-                f"invalid manifest record at {path}:{line_number}"
-            ) from error
-
-    return records
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def create_pack(
@@ -419,54 +325,34 @@ def create_pack(
     passphrase: str,
 ) -> str:
     root = root.resolve()
+
+    if not root.is_dir():
+        raise RuntimeError(f"archive root is not a directory: {root}")
+
+    validate_pack_id(pack_id)
     destination.mkdir(parents=True, exist_ok=True)
-    pack_version = next_pack_version(destination, pack_id)
-    full_pack_id = f"{pack_id}-{pack_version:03d}"
+    full_pack_id = f"{pack_id}-{utc_timestamp()}"
 
-    previous_manifest = latest_manifest(destination, pack_id)
+    archive_final = destination / f"coldpack-{full_pack_id}.tar.gz.age"
+    manifest_final = destination / f"coldpack-{full_pack_id}.manifest.jsonl.age"
 
-    if previous_manifest is None:
-        previous_records = []
-    else:
-        manifest_path, manifest_pack_id = previous_manifest
-        try:
-            previous_records = read_manifest(
-                manifest_path,
-                manifest_pack_id,
-                passphrase,
-            )
-        except ManifestDecryptionError as error:
-            raise RuntimeError(
-                "passphrase does not match the previous pack version "
-                f"{manifest_pack_id} (or its manifest is damaged)"
-            ) from error
-
-    observed_records = scan(root, full_pack_id)
-    witnessed = {
-        (record.path, record.hash_algo, record.hash)
-        for record in previous_records
-    }
-    new_records = [
-        record
-        for record in observed_records
-        if (record.path, record.hash_algo, record.hash) not in witnessed
-    ]
-    cumulative_records = previous_records + new_records
-
-    archive_final = destination / f"coldpack-{full_pack_id}.tar.zst.age"
-    manifest_final = destination / f"coldpack-{full_pack_id}.jsonl.age"
-
-    archive_tmp = destination / f".coldpack-{full_pack_id}.tar.zst.age.tmp"
-    manifest_plain_tmp = destination / f".coldpack-{full_pack_id}.jsonl.tmp"
-    manifest_encrypted_tmp = destination / f".coldpack-{full_pack_id}.jsonl.age.tmp"
+    archive_tmp = destination / f".coldpack-{full_pack_id}.tar.gz.age.tmp"
+    manifest_plain_tmp = (
+        destination / f".coldpack-{full_pack_id}.manifest.jsonl.tmp"
+    )
+    manifest_encrypted_tmp = (
+        destination / f".coldpack-{full_pack_id}.manifest.jsonl.age.tmp"
+    )
 
     if archive_final.exists() or manifest_final.exists():
         raise RuntimeError(f"pack already exists: {full_pack_id}")
 
+    records = scan(root, full_pack_id)
+
     try:
         create_archive(
             root,
-            new_records,
+            records,
             archive_tmp,
             passphrase,
         )
@@ -474,7 +360,7 @@ def create_pack(
         write_manifest(
             manifest_plain_tmp,
             full_pack_id,
-            cumulative_records,
+            records,
         )
 
         encrypt_file(
@@ -500,7 +386,7 @@ def extract_pack(
     destination: Path,
     passphrase: str,
 ) -> None:
-    """Pipe an encrypted coldpack archive through age and zstd into tar."""
+    """Pipe an encrypted coldpack archive through age and gzip into tar."""
     if not archive.is_file():
         raise RuntimeError(f"archive not found: {archive}")
 
@@ -520,27 +406,27 @@ def extract_pack(
 
         assert age.stdout is not None
 
-        zstd = subprocess.Popen(
-            ["zstd", "-q", "-d", "-c"],
+        gzip = subprocess.Popen(
+            ["gzip", "-d", "-c"],
             stdin=age.stdout,
             stdout=subprocess.PIPE,
         )
         age.stdout.close()
 
-        assert zstd.stdout is not None
+        assert gzip.stdout is not None
 
         tar = subprocess.Popen(
             ["tar", "-xf", "-", "-C", str(destination)],
-            stdin=zstd.stdout,
+            stdin=gzip.stdout,
         )
-        zstd.stdout.close()
+        gzip.stdout.close()
 
         try:
             tar_rc = tar.wait()
-            zstd_rc = zstd.wait()
+            gzip_rc = gzip.wait()
             age_rc = age.wait()
         except BaseException:
-            for proc in (age, zstd, tar):
+            for proc in (age, gzip, tar):
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -549,8 +435,8 @@ def extract_pack(
 
     if age_rc != 0:
         error = RuntimeError(f"age failed with exit status {age_rc}")
-    elif zstd_rc != 0:
-        error = RuntimeError(f"zstd failed with exit status {zstd_rc}")
+    elif gzip_rc != 0:
+        error = RuntimeError(f"gzip failed with exit status {gzip_rc}")
     elif tar_rc != 0:
         error = RuntimeError(f"tar failed with exit status {tar_rc}")
     else:
@@ -615,18 +501,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pack.add_argument("destination", type=Path, help="directory for pack files")
     pack.add_argument(
         "pack_id",
-        help="series ID; the next numeric pack version is selected automatically",
+        help="ID placed before the automatically generated UTC timestamp",
     )
 
     extract = commands.add_parser("extract", help="extract an encrypted archive")
-    extract.add_argument("archive", type=Path, help="encrypted .tar.zst.age file")
+    extract.add_argument("archive", type=Path, help="encrypted .tar.gz.age file")
     extract.add_argument("destination", type=Path, help="directory to extract into")
 
     manifest = commands.add_parser(
         "manifest",
         help="decrypt a pack manifest to standard output",
     )
-    manifest.add_argument("manifest", type=Path, help="encrypted .jsonl.age file")
+    manifest.add_argument(
+        "manifest",
+        type=Path,
+        help="encrypted .manifest.jsonl.age file",
+    )
 
     return parser.parse_args(argv)
 
@@ -635,7 +525,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if args.command == "pack":
-        require_tools("tar", "zstd", "age", "age-plugin-batchpass")
+        require_tools("tar", "gzip", "age", "age-plugin-batchpass")
         pack_id = create_pack(
             args.root,
             args.destination,
@@ -644,7 +534,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"created pack {pack_id}", file=sys.stderr)
     elif args.command == "extract":
-        require_tools("tar", "zstd", "age", "age-plugin-batchpass")
+        require_tools("tar", "gzip", "age", "age-plugin-batchpass")
         extract_pack(
             args.archive,
             args.destination,

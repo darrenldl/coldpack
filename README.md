@@ -10,17 +10,18 @@ Create a pack (the passphrase is requested twice):
 python3 coldpack.py pack ROOT DEST PACK_ID
 ```
 
-Coldpack automatically adds the next three-digit pack version to the pack ID.
-For example, the first pack using ID `2026-aug` creates
-`coldpack-2026-aug-000.tar.zst.age` and
-`coldpack-2026-aug-000.jsonl.age`. The next invocation with the same pack ID
-uses version `001`.
+Coldpack adds the current UTC date and time to the supplied pack ID. For example,
+a pack using ID `2026-aug` might create:
 
-Each version archives only `(path, hash)` pairs not already witnessed by the
-series. Its manifest remains cumulative: it contains every file version seen in
-the series and records the pack version where that content was first stored.
-Creating a later version requires the same passphrase as the previous version,
-which Coldpack validates before hashing or creating any new artifacts.
+```text
+coldpack-2026-aug-20260818T143052Z.tar.gz.age
+coldpack-2026-aug-20260818T143052Z.manifest.jsonl.age
+```
+
+Every pack is a complete, independent archive. The encrypted sidecar manifest
+lists each archived regular file with its BLAKE2b hash, size, modification time,
+and full pack ID. Coldpack refuses to overwrite an existing archive or manifest
+if two invocations select the same timestamp.
 
 Extract a pack (the passphrase is requested once):
 
@@ -31,7 +32,10 @@ python3 coldpack.py extract ARCHIVE DEST
 Decrypt a pack manifest to standard output (the passphrase is requested once):
 
 ```console
-python3 coldpack.py manifest MANIFEST.jsonl.age
+python3 coldpack.py manifest MANIFEST.manifest.jsonl.age
 ```
 
-Coldpack requires `tar`, `zstd`, `age`, and `age-plugin-batchpass` on `PATH`.
+Coldpack requires Python 3, `tar`, `gzip`, `age`, and
+`age-plugin-batchpass` on `PATH`. Gzip is used instead of Zstandard to maximize
+the chance that the compression format is already available in a minimal
+disaster-recovery environment.
