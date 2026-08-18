@@ -351,6 +351,7 @@ def create_pack(
         raise RuntimeError(f"pack already exists: {full_pack_id}")
 
     records = scan(root)
+    print("hashing complete, packing archive", file=sys.stderr)
 
     try:
         create_archive(
