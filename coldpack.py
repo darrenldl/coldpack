@@ -58,9 +58,13 @@ def walk_files(root: Path) -> Iterable[Path]:
     root = root.resolve()
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
         base = Path(dirpath)
 
         for name in filenames:
+            if name.startswith("."):
+                continue
+
             path = base / name
 
             if path.is_symlink():
