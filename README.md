@@ -20,8 +20,8 @@ coldpack-2026-aug-20260818T143052Z.manifest.jsonl.age
 
 Every pack is a complete, independent archive. The encrypted sidecar manifest
 lists each archived regular file with its BLAKE2b hash, size, modification time,
-and full pack ID. Coldpack refuses to overwrite an existing archive or manifest
-if two invocations select the same timestamp.
+while the manifest header identifies the full pack. Coldpack refuses to overwrite
+an existing archive or manifest if two invocations select the same timestamp.
 
 Extract a pack (the passphrase is requested once):
 

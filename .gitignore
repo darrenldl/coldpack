@@ -1,4 +1,5 @@
 test-dir-in/
 test-dir-out/
+packs/
 *.age
 __pycache__/

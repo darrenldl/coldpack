@@ -21,7 +21,6 @@ class FileRecord:
     hash: str
     size: int
     mtime_ns: int
-    pack: str
 
     def to_json(self) -> str:
         return json.dumps(
@@ -30,7 +29,6 @@ class FileRecord:
                 "hash": f"{self.hash_algo}:{self.hash}",
                 "size": self.size,
                 "mtime_ns": self.mtime_ns,
-                "pack": self.pack,
             },
             separators=(",", ":"),
         )
@@ -70,7 +68,7 @@ def walk_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
-def scan(root: Path, pack_id: str) -> list[FileRecord]:
+def scan(root: Path) -> list[FileRecord]:
     records = []
 
     for path in walk_files(root):
@@ -88,7 +86,6 @@ def scan(root: Path, pack_id: str) -> list[FileRecord]:
                 hash=hash,
                 size=st.st_size,
                 mtime_ns=st.st_mtime_ns,
-                pack=pack_id,
             )
         )
 
@@ -347,7 +344,7 @@ def create_pack(
     if archive_final.exists() or manifest_final.exists():
         raise RuntimeError(f"pack already exists: {full_pack_id}")
 
-    records = scan(root, full_pack_id)
+    records = scan(root)
 
     try:
         create_archive(
