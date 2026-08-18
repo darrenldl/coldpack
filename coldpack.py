@@ -13,6 +13,11 @@ from typing import Iterable
 
 CHUNK_SIZE = 1024 * 1024
 
+
+class ManifestDecryptionError(RuntimeError):
+    pass
+
+
 @dataclass
 class FileRecord:
     path: str
@@ -380,7 +385,9 @@ def read_manifest(
         plaintext, _ = age.communicate()
 
     if age.returncode != 0:
-        raise RuntimeError(f"age failed with exit status {age.returncode}")
+        raise ManifestDecryptionError(
+            f"age failed with exit status {age.returncode}"
+        )
 
     try:
         lines = plaintext.decode("utf-8").splitlines()
@@ -422,11 +429,17 @@ def create_pack(
         previous_records = []
     else:
         manifest_path, manifest_pack_id = previous_manifest
-        previous_records = read_manifest(
-            manifest_path,
-            manifest_pack_id,
-            passphrase,
-        )
+        try:
+            previous_records = read_manifest(
+                manifest_path,
+                manifest_pack_id,
+                passphrase,
+            )
+        except ManifestDecryptionError as error:
+            raise RuntimeError(
+                "passphrase does not match the previous pack version "
+                f"{manifest_pack_id} (or its manifest is damaged)"
+            ) from error
 
     observed_records = scan(root, full_pack_id)
     witnessed = {

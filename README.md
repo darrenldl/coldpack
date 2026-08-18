@@ -19,6 +19,8 @@ uses version `001`.
 Each version archives only `(path, hash)` pairs not already witnessed by the
 series. Its manifest remains cumulative: it contains every file version seen in
 the series and records the pack version where that content was first stored.
+Creating a later version requires the same passphrase as the previous version,
+which Coldpack validates before hashing or creating any new artifacts.
 
 Extract a pack (the passphrase is requested once):
 
