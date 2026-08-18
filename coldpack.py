@@ -35,8 +35,11 @@ class FileRecord:
         )
 
 
-def require_tools() -> None:
-    for tool in ("tar", "zstd", "age", "age-plugin-batchpass"):
+def require_tools(*tools: str) -> None:
+    if not tools:
+        tools = ("tar", "zstd", "age", "age-plugin-batchpass")
+
+    for tool in tools:
         if shutil.which(tool) is None:
             raise SystemExit(f"required tool not found: {tool}")
 
@@ -449,6 +452,31 @@ def extract_pack(
     raise error
 
 
+def decrypt_manifest(
+    manifest: Path,
+    passphrase: str,
+    *,
+    stdout=None,
+) -> None:
+    """Decrypt an encrypted JSON Lines manifest to stdout."""
+    if not manifest.is_file():
+        raise RuntimeError(f"manifest not found: {manifest}")
+
+    if stdout is None:
+        stdout = sys.stdout.buffer
+
+    with manifest.open("rb") as infile:
+        age = age_decrypt_process(
+            stdin=infile,
+            stdout=stdout,
+            passphrase=passphrase,
+        )
+        age_rc = age.wait()
+
+    if age_rc != 0:
+        raise RuntimeError(f"age failed with exit status {age_rc}")
+
+
 def prompt_passphrase(*, confirm: bool) -> str:
     password = getpass.getpass("Coldpack passphrase: ")
 
@@ -484,14 +512,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     extract.add_argument("archive", type=Path, help="encrypted .tar.zst.age file")
     extract.add_argument("destination", type=Path, help="directory to extract into")
 
+    manifest = commands.add_parser(
+        "manifest",
+        help="decrypt a pack manifest to standard output",
+    )
+    manifest.add_argument("manifest", type=Path, help="encrypted .jsonl.age file")
+
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    require_tools()
 
     if args.command == "pack":
+        require_tools("tar", "zstd", "age", "age-plugin-batchpass")
         pack_id = create_pack(
             args.root,
             args.destination,
@@ -499,10 +533,17 @@ def main(argv: list[str] | None = None) -> None:
             prompt_passphrase(confirm=True),
         )
         print(f"created pack {pack_id}", file=sys.stderr)
-    else:
+    elif args.command == "extract":
+        require_tools("tar", "zstd", "age", "age-plugin-batchpass")
         extract_pack(
             args.archive,
             args.destination,
+            prompt_passphrase(confirm=False),
+        )
+    else:
+        require_tools("age", "age-plugin-batchpass")
+        decrypt_manifest(
+            args.manifest,
             prompt_passphrase(confirm=False),
         )
 

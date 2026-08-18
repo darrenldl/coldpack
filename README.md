@@ -22,4 +22,10 @@ Extract a pack (the passphrase is requested once):
 python3 coldpack.py extract ARCHIVE DEST
 ```
 
+Decrypt a pack manifest to standard output (the passphrase is requested once):
+
+```console
+python3 coldpack.py manifest MANIFEST.jsonl.age
+```
+
 Coldpack requires `tar`, `zstd`, `age`, and `age-plugin-batchpass` on `PATH`.
