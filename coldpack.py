@@ -3,6 +3,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -303,14 +304,39 @@ def atomic_replace(temp: Path, final: Path) -> None:
     os.replace(temp, final)
 
 
+def next_pack_id(destination: Path, pack_prefix: str) -> str:
+    """Return PREFIX-NNN using the next version present in destination."""
+    if not pack_prefix or pack_prefix in (".", ".."):
+        raise RuntimeError("pack prefix must not be empty, '.' or '..'")
+
+    if "/" in pack_prefix or "\\" in pack_prefix:
+        raise RuntimeError("pack prefix must not contain path separators")
+
+    pattern = re.compile(
+        rf"coldpack-{re.escape(pack_prefix)}-(\d+)"
+        rf"(?:\.tar\.zst|\.jsonl)\.age"
+    )
+    versions = []
+
+    for path in destination.iterdir():
+        match = pattern.fullmatch(path.name)
+
+        if match is not None:
+            versions.append(int(match.group(1)))
+
+    version = max(versions, default=-1) + 1
+    return f"{pack_prefix}-{version:03d}"
+
+
 def create_pack(
     root: Path,
     destination: Path,
-    pack_id: str,
+    pack_prefix: str,
     passphrase: str,
-) -> None:
+) -> str:
     root = root.resolve()
     destination.mkdir(parents=True, exist_ok=True)
+    pack_id = next_pack_id(destination, pack_prefix)
 
     records = scan(root, pack_id)
 
@@ -352,6 +378,8 @@ def create_pack(
         archive_tmp.unlink(missing_ok=True)
         manifest_plain_tmp.unlink(missing_ok=True)
         manifest_encrypted_tmp.unlink(missing_ok=True)
+
+    return pack_id
 
 
 def extract_pack(
@@ -447,7 +475,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pack = commands.add_parser("pack", help="create an encrypted archive")
     pack.add_argument("root", type=Path, help="directory to archive")
     pack.add_argument("destination", type=Path, help="directory for pack files")
-    pack.add_argument("pack_id", help="identifier used in pack filenames")
+    pack.add_argument(
+        "pack_prefix",
+        help="ID prefix; the next numeric version is selected automatically",
+    )
 
     extract = commands.add_parser("extract", help="extract an encrypted archive")
     extract.add_argument("archive", type=Path, help="encrypted .tar.zst.age file")
@@ -461,12 +492,13 @@ def main(argv: list[str] | None = None) -> None:
     require_tools()
 
     if args.command == "pack":
-        create_pack(
+        pack_id = create_pack(
             args.root,
             args.destination,
-            args.pack_id,
+            args.pack_prefix,
             prompt_passphrase(confirm=True),
         )
+        print(f"created pack {pack_id}", file=sys.stderr)
     else:
         extract_pack(
             args.archive,
