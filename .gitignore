@@ -1,3 +1,4 @@
-test-dir/
+test-dir-in/
+test-dir-out/
 *.age
 __pycache__/
