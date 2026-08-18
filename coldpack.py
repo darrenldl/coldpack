@@ -1,3 +1,4 @@
+import argparse
 import getpass
 import hashlib
 import json
@@ -127,6 +128,37 @@ def age_encrypt_process(
             [
                 "age",
                 "-e",
+                "-j",
+                "batchpass",
+            ],
+            stdin=stdin,
+            stdout=stdout,
+            env=env,
+            pass_fds=(rfd,),
+        )
+    finally:
+        os.close(rfd)
+
+    return proc
+
+
+def age_decrypt_process(
+    *,
+    stdin,
+    stdout,
+    passphrase: str,
+) -> subprocess.Popen:
+    """Start ``age -d -j batchpass`` with a private passphrase pipe."""
+    rfd, _ = make_passphrase_pipe(passphrase)
+
+    env = os.environ.copy()
+    env["AGE_PASSPHRASE_FD"] = str(rfd)
+
+    try:
+        proc = subprocess.Popen(
+            [
+                "age",
+                "-d",
                 "-j",
                 "batchpass",
             ],
@@ -322,42 +354,125 @@ def create_pack(
         manifest_encrypted_tmp.unlink(missing_ok=True)
 
 
-def prompt_passphrase() -> str:
+def extract_pack(
+    archive: Path,
+    destination: Path,
+    passphrase: str,
+) -> None:
+    """Pipe an encrypted coldpack archive through age and zstd into tar."""
+    if not archive.is_file():
+        raise RuntimeError(f"archive not found: {archive}")
+
+    destination_existed = destination.exists()
+
+    if destination_existed and not destination.is_dir():
+        raise RuntimeError(f"destination is not a directory: {destination}")
+
+    destination.mkdir(parents=True, exist_ok=True)
+
+    with archive.open("rb") as infile:
+        age = age_decrypt_process(
+            stdin=infile,
+            stdout=subprocess.PIPE,
+            passphrase=passphrase,
+        )
+
+        assert age.stdout is not None
+
+        zstd = subprocess.Popen(
+            ["zstd", "-q", "-d", "-c"],
+            stdin=age.stdout,
+            stdout=subprocess.PIPE,
+        )
+        age.stdout.close()
+
+        assert zstd.stdout is not None
+
+        tar = subprocess.Popen(
+            ["tar", "-xf", "-", "-C", str(destination)],
+            stdin=zstd.stdout,
+        )
+        zstd.stdout.close()
+
+        try:
+            tar_rc = tar.wait()
+            zstd_rc = zstd.wait()
+            age_rc = age.wait()
+        except BaseException:
+            for proc in (age, zstd, tar):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            raise
+
+    if age_rc != 0:
+        error = RuntimeError(f"age failed with exit status {age_rc}")
+    elif zstd_rc != 0:
+        error = RuntimeError(f"zstd failed with exit status {zstd_rc}")
+    elif tar_rc != 0:
+        error = RuntimeError(f"tar failed with exit status {tar_rc}")
+    else:
+        return
+
+    if not destination_existed:
+        shutil.rmtree(destination)
+
+    raise error
+
+
+def prompt_passphrase(*, confirm: bool) -> str:
     password = getpass.getpass("Coldpack passphrase: ")
 
     if not password:
         raise SystemExit("empty passphrase refused")
 
-    confirm = getpass.getpass("Confirm passphrase: ")
+    if not confirm:
+        return password
 
-    if password != confirm:
+    confirmation = getpass.getpass("Confirm passphrase: ")
+
+    if password != confirmation:
         raise SystemExit("passphrases do not match")
 
     return password
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create and extract encrypted archives for cold files."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    pack = commands.add_parser("pack", help="create an encrypted archive")
+    pack.add_argument("root", type=Path, help="directory to archive")
+    pack.add_argument("destination", type=Path, help="directory for pack files")
+    pack.add_argument("pack_id", help="identifier used in pack filenames")
+
+    extract = commands.add_parser("extract", help="extract an encrypted archive")
+    extract.add_argument("archive", type=Path, help="encrypted .tar.zst.age file")
+    extract.add_argument("destination", type=Path, help="directory to extract into")
+
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     require_tools()
 
-    if len(sys.argv) != 4:
-        print(
-            f"usage: {sys.argv[0]} ROOT DEST PACK_ID",
-            file=sys.stderr,
+    if args.command == "pack":
+        create_pack(
+            args.root,
+            args.destination,
+            args.pack_id,
+            prompt_passphrase(confirm=True),
         )
-        raise SystemExit(2)
-
-    root = Path(sys.argv[1])
-    destination = Path(sys.argv[2])
-    pack_id = sys.argv[3]
-
-    passphrase = prompt_passphrase()
-
-    create_pack(
-        root,
-        destination,
-        pack_id,
-        passphrase,
-    )
+    else:
+        extract_pack(
+            args.archive,
+            args.destination,
+            prompt_passphrase(confirm=False),
+        )
 
 if __name__ == "__main__":
     main()
